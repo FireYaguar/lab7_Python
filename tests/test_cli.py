@@ -71,3 +71,8 @@ def test_full_corpus_end_to_end(tmp_path: Path) -> None:
     assert runner.invoke(app, ["index", str(data), "--out", str(out), "--positions"]).exit_code == 0
     res = runner.invoke(app, ["search", str(out), '"event loop"', "--json"])
     assert "asyncio" in res.stdout
+
+
+def test_serve_without_index_is_one_line_error(tmp_path: Path) -> None:
+    res = runner.invoke(app, ["serve", "--index", str(tmp_path / "none.bin")])
+    assert res.exit_code == 1 and "index file not found" in res.stderr

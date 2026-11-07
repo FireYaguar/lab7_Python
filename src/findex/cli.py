@@ -213,6 +213,44 @@ def crawl_cmd(
     )
 
 
+@app.command("serve")
+def serve_cmd(
+    index_path: Annotated[
+        Path | None, typer.Option("--index", help="Index file (default: $INDEX_PATH or index.bin).")
+    ] = None,
+    host: Annotated[str, typer.Option(help="Bind address (0.0.0.0 in a container).")] = "127.0.0.1",
+    port: Annotated[int, typer.Option(envvar="PORT", help="Port ($PORT on Render/Fly).")] = 8000,
+    workers: Annotated[int, typer.Option(min=1, help="uvicorn worker processes.")] = 1,
+) -> None:
+    """Run the web API + UI with uvicorn (http://HOST:PORT/, OpenAPI at /docs)."""
+    import uvicorn
+
+    if index_path is not None:
+        os.environ["INDEX_PATH"] = str(index_path)  # read by Settings in every worker process
+    path = Path(os.environ.get("INDEX_PATH", "index.bin"))
+    if not path.is_file():
+        fail(f"index file not found: {path} (build it with `findex index`)")
+    # Logs go to stdout in every worker (the platform's log panel reads stdout):
+    # uvicorn's own config + our "findex" loggers, level from $LOG_LEVEL.
+    import copy
+
+    from uvicorn.config import LOGGING_CONFIG
+
+    level = os.environ.get("LOG_LEVEL", "INFO").upper()
+    log_config = copy.deepcopy(LOGGING_CONFIG)
+    log_config["loggers"]["findex"] = {"handlers": ["default"], "level": level, "propagate": False}
+    uvicorn.run(
+        "findex.web.app:app",
+        host=host,
+        port=port,
+        workers=workers,
+        log_config=log_config,
+        log_level=level.lower(),
+        proxy_headers=True,
+        forwarded_allow_ips="*",
+    )
+
+
 @app.command("search")
 def search_cmd(
     index_path: Annotated[Path, typer.Argument(metavar="INDEX", help="Index file.")],

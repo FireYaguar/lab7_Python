@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block title %}{{ meta.title }} — findex{% endblock %}
+{% block main %}
+<p><a href="/?q={{ q | urlencode }}">← back to results</a></p>
+<article>
+  <h1>{{ meta.title }}</h1>
+  <p class="meta">doc #{{ meta.doc_id }} · {{ "{:,}".format(length) }} tokens · <code>{{ meta.path }}</code></p>
+  {% if text %}<pre>{{ text }}</pre>{% else %}<p class="empty">The text of this document is not stored with the index.</p>{% endif %}
+</article>
+{% endblock %}

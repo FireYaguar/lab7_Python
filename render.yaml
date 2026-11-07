@@ -1,0 +1,13 @@
+# Render Blueprint: New -> Blueprint -> pick this repo. Free plan, Docker runtime.
+services:
+  - type: web
+    name: findex
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: LOG_LEVEL
+        value: INFO
+      - key: WEB_CONCURRENCY
+        value: "1"

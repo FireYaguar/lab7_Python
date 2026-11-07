@@ -2,6 +2,8 @@
 
 [![CI](https://github.com/OWNER/findex/actions/workflows/ci.yml/badge.svg)](https://github.com/OWNER/findex/actions/workflows/ci.yml)
 
+**🔎 Live: https://findex-OWNER.onrender.com** · API: [`/docs`](https://findex-OWNER.onrender.com/docs) · health: [`/health`](https://findex-OWNER.onrender.com/health)
+
 Повнотекстовий пошуковик, який будую протягом семестру (курс «Python — Build a Search Engine», 8 лабораторних).
 Кожна лабораторна — окремий git-тег (`lab-01`, `lab-02`, …).
 
@@ -529,3 +531,104 @@ WARNING asyncio: Executing <Task pending name='Task-1' coro=<main() ...> took 0.
 `build_index` — це чистий CPU без жодного `await`, тож на 0,1–0,6 с (і що далі, то довше) зупиняються **всі** 20 воркерів: відповіді вже лежать у сокетах, але їх ніхто не читає, таймаути спливають, а лічильник пауз на хост «з'їдає» час. Тому краулер лише пише JSONL, а індекс будує `findex index` уже після обходу (у Лабі 5 — на процесах). Якби індексувати треба було під час обходу, CPU-роботу варто віддати в `loop.run_in_executor(ProcessPoolExecutor, ...)`.
 
 Тести: 98 (усі зелені), pyright strict — 0 помилок. Покриття впало з 97 до **92 %**: команду `findex crawl` (живий екран rich, `asyncio.run`) я перевіряв вручну на дзеркалі, а не в pytest. Логіку під нею (`crawl_to_jsonl`, `crawl`, `fetch`, `RobotsCache`) покривають тести на `MockTransport`.
+
+---
+
+# Лабораторна 7 — пошук у вебі (FastAPI)
+
+## Що зроблено
+
+```
+src/findex/web/
+  settings.py   # Settings(BaseSettings): INDEX_PATH, LOG_LEVEL — лише зі змінних оточення (+ .env локально)
+  models.py     # Pydantic лише на межі: SearchResponse, Hit, DocumentOut, StatsOut, Health
+  app.py        # create_app(): lifespan, Depends(get_index), маршрути, request-id, обробник 500
+  templates/    # Jinja2: base.html, index.html (пошук), doc.html (документ)
+  static/       # style.css
+Dockerfile, .dockerignore, render.yaml
+tests/test_web.py          # TestClient + dependency_overrides, без файлу індексу
+scripts/lab07_variants.py  # копія /search на async def — лише для виміру
+```
+
+| Маршрут | Що робить |
+|---|---|
+| `GET /search?q=&k=&scorer=&page=` | JSON. `q`: 1–200 символів; `k`: 1–50; `scorer`: `bm25`/`tfidf` (`Literal` → enum у схемі); `page`: 1–100. Відповідь: `total`, `pages`, `took_ms`, `results[]` (doc_id, title, score, snippet, url). Неправильний тип чи межа → **422**, зламаний запит → **400** |
+| `GET /docs/{doc_id}` | документ (метадані + текст), невідомий → **404** |
+| `GET /stats` | документи, терміни, постінги, середня довжина, розмір файлу, uptime |
+| `GET /health` | `{"status":"ok","documents":560}` або **503**, якщо індекс не завантажено |
+| `GET /`, `GET /doc/{id}` | HTML-інтерфейс (Jinja2) |
+| `GET /docs` | OpenAPI/Swagger, згенерований з анотацій типів і моделей Pydantic |
+
+- **lifespan** завантажує індекс **один раз** через `open_index(settings.index_path)` з Лаби 3 і кладе його в `app.state.index`. Якщо файлу немає, падає вже **старт** (`FileNotFoundError`), а не перший запит. Після `yield` контекстний менеджер закриває індекс. `get_index` (через `Depends`) лише дістає його зі `state`, тому в тестах `app.dependency_overrides[get_index] = lambda: tiny_index`.
+- **Pydantic лише на межі**: `Hit.from_result(SearchResult)` перетворює внутрішні dataclass-и Лаб 2–3 на моделі відповіді. `Index`, `Posting`, `SearchResult` лишились dataclass-ами.
+- **Помилки**: middleware дає кожному запиту `X-Request-ID` (або бере його з запиту). Неочікуваний виняток пишеться в лог разом зі стеком і id (`request req-42 GET /search failed`), а клієнт отримує лише `{"detail":"internal server error","request_id":"req-42"}` зі статусом 500.
+- **`findex serve [--index] [--host] [--port|$PORT] [--workers N]`** запускає uvicorn, тож вхід у програму, як і раніше, через CLI. Логи uvicorn і `findex` йдуть у stdout, рівень береться з `$LOG_LEVEL`:
+  ```
+  INFO:     loaded Index(terms=42_604, docs=560, positions=True) from index.bin in 0.83 s
+  INFO:     127.0.0.1:46592 - "GET /search?q=(bad HTTP/1.1" 400 Bad Request
+  ```
+- **UI**: поле пошуку з вибором BM25/TF-IDF, підказка синтаксису, кількість збігів і час, сніпети з `<mark>` (спершу HTML-escape, потім `**term**` → `<mark>`), бал, сторінки «← previous / next →», перегляд документа. Шрифт системний, ширина обмежена 760 px. htmx я не додавав (це опційно).
+
+```bash
+findex index data/ --out index.bin --positions
+findex serve --index index.bin                   # http://127.0.0.1:8000/  ·  /docs  ·  /health
+INDEX_PATH=index.bin uvicorn findex.web.app:app  # те саме напряму
+```
+
+**Тести** (`tests/test_web.py`, 18 тестів): успішний пошук і пагінація, сім варіантів **422**, 400 на зламаний запит, **404** документа, `/stats`, **`/health` → 503**, коли індекс не завантажено, lifespan вантажить індекс один раз і звільняє його, відсутній файл валить старт, **500 без стека** з `request_id` (стек лише в лозі), HTML-сторінки, екранування в `highlight`, `/openapi.json` і `/docs`. Разом 117 тестів (2 з них `slow`), покриття 93 %, pyright strict — 0 помилок.
+
+## `def` чи `async def` для `/search`
+
+Пошук — це CPU-робота (~17 мс на `q=python`: обчислення дерева, BM25, читання 10 файлів для сніпетів), і в ній немає жодного `await`. Обидва варіанти виміряно на одному сервері (`scripts/lab07_variants.py`: `/search` — `def`, `/search_async` — `async def` з тим самим тілом). Машина та сама, що в Лабі 5: 2 ядра, Xeon 2,1 ГГц; `oha` працює на тій самій машині.
+
+**20 одночасних запитів** (`oha -n 20 -c 20`, по 3 прогони):
+
+| Варіант | Загалом | p50 | найшвидший | найповільніший |
+|---|---|---|---|---|
+| `def` (пул потоків) | 0,36–0,43 с | 313–354 мс | 115–313 мс | 356–432 мс |
+| `async def` | 0,35 с | 220–233 мс | 51–197 мс | 345–354 мс |
+
+Загальний час однаковий (~0,35 с ≈ 20 × 17 мс): робота однієї природи, і GIL у будь-якому разі виконує її по черзі. Відрізняється **розподіл**. `async def` обробляє запити строго один за одним на циклі подій: перші відповіді приходять швидко, останні — повільно. `def` віддає їх у пул потоків, і там вони чергуються під GIL: усі завершуються «разом» і пізніше, але жоден не блокує цикл.
+
+**Що відчувають сторонні запити.** Під навантаженням на `/search` (20 клієнтів) окремо міряємо `/health` (40 запитів підряд):
+
+| Навантаження на | `/health` p50 | p95 | p99 / max |
+|---|---|---|---|
+| `def /search` | 17–18 мс | 102–119 мс | 114–134 мс |
+| `async def /search` | 0,4–0,6 мс | 391–413 мс | 406–414 мс |
+
+З `async def` цикл подій зайнятий пошуком, і `/health` чекає, поки виконається вся черга (~20 × 17 мс ≈ 400 мс). На платформі такий health-check може дати таймаут, і сервіс перезапустять. З `def` цикл вільний, і `/health` відповідає в межах ~0,1 с: затримка лише від того, що він ділить GIL з потоками пулу. **Тому в коді лишився `def /search`**, а маршрут `/health`, який нічого не блокує, тепер `async def`. Спершу він теж був `def` і стояв у тій самій черзі пулу потоків, що й пошук; вимір це показав.
+
+## Навантаження: oha
+
+`oha -z 15s -c 50 "…/search?q=python"`, індекс з позиціями, 560 документів:
+
+| Ціль | Маршрут | Concurrency | RPS | p50 (ms) | p95 (ms) | p99 (ms) |
+|---|---|---|---|---|---|---|
+| local, 1 worker, `async def` | `/search_async` | 50 | 62.3 | 806 | 881 | 2704 |
+| local, 1 worker, `def` | `/search` | 50 | 53.0 | 955 | 1349 | 1867 |
+| local, 4 workers, `def` | `/search` | 50 | **117.7** | **413** | **698** | **820** |
+| deployed (Render free) | `/search` | 20 | _заповнити_ | | | |
+
+**Як це пов'язано з Лабами 5–6.** Один процес упирається в **GIL** (Лаба 5): пошук — це Python-код на CPU, тож і `async def`, і пул потоків виконують його по одному запиту за раз, звідси стеля ~55–60 RPS ≈ 1 / 17 мс. `async def` дав навіть трохи більше RPS (немає перемикань між потоками), але це **заблокований цикл подій** з Лаби 6. Запити обробляються в порядку прийняття, хтось потрапляє в кінець черги, і p99 = 2,7 с (у 3,4 раза гірше за p50). **Пул потоків** (`def`) не додає паралелізму, бо GIL той самий, зате цикл подій вільний і черга «чесніша»: p99 1,9 с, і сторонні запити (`/health`) не застрягають. Реально помогли **кілька процесів**: 4 воркери uvicorn — це 4 інтерпретатори з власними GIL, тож на 2 ядрах RPS зріс у 2,2 раза, а p99 впав до 0,8 с. Більше ніж 2× тут не отримати: ядер лише 2, і ще одне ділить `oha`. Це те саме, що `ProcessPoolExecutor` у Лабі 5, тільки процеси тримає uvicorn.
+
+## Docker і деплой
+
+**Dockerfile** — два етапи за [uv Docker guide](https://docs.astral.sh/uv/guides/integration/docker/):
+1. `builder` (`ghcr.io/astral-sh/uv:python3.13-bookworm-slim`): спершу лише залежності за `uv.lock` (`uv sync --locked --no-dev --no-install-project`, окремий шар кешу), потім сам пакет (`--no-editable`). Там же завантажується корпус (`scripts/get_corpus.sh`) і будується індекс; для демо вони «запечені» в образ.
+2. runtime (`python:3.13-slim-bookworm`): лише `.venv`, `data/` та `index.bin`, користувач **`app` (uid 10001), не root**. Конфіг лише з оточення: `INDEX_PATH`, `LOG_LEVEL`, `PORT`, `WEB_CONCURRENCY`. Є `HEALTHCHECK` на `/health`.
+
+```bash
+docker build -t findex .
+docker run --rm -p 8000:8000 -e INDEX_PATH=/app/index.bin findex     # http://localhost:8000/
+```
+
+У середовищі, де я робив лабу, не було демона Docker і доступу до реєстрів образів, тож `docker build` я не запускав. Кроки обох етапів я відтворив вручну: `uv sync --locked --no-dev --no-editable` у чистій копії, шаблони й CSS потрапили в пакет, dev-залежностей немає; індекс збудовано; `findex serve --host 0.0.0.0` з `$PORT` віддає `/health` 200, `/` 200, `/static/style.css` 200.
+
+**Render** (безкоштовний план, Docker runtime): `render.yaml` у корені — це Blueprint.
+1. render.com → New → **Blueprint** → вибрати цей репозиторій (або New → Web Service → Docker).
+2. **Health Check Path = `/health`** (уже в `render.yaml`). Render сам задає `$PORT`, змінні оточення — у вкладці Environment, логи — у вкладці **Logs** (там видно `loaded Index(...)` та access-лог).
+3. Публічну адресу вписати на початок README (замість `findex-OWNER.onrender.com`).
+4. Рядок «deployed» для таблиці: `oha -z 30s -c 20 "https://<адреса>/search?q=python"`.
+
+Безкоштовний інстанс Render засинає без трафіку, і перший запит після паузи йде ~30–60 с (холодний старт плюс завантаження індексу), тож перед `oha` відкрий `/health`. Крім того, там зазвичай лише частка ядра, тож RPS буде нижчий за локальний, а p50 додасть мережа (~50–150 мс).

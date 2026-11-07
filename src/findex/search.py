@@ -69,12 +69,12 @@ def search(
     results: list[SearchResult] = []
     for doc_id, score in top:
         meta = index.doc_meta[doc_id]
-        text = _read_text(meta.path)
+        text = read_text(meta.path)
         results.append(SearchResult(score, doc_id, meta.title, meta.path, snippet(text, terms)))
     return results
 
 
-def _read_text(path: str) -> str:
+def read_text(path: str) -> str:
     p = Path(path)
     return p.read_text(encoding="utf-8", errors="replace") if p.is_file() else ""
 

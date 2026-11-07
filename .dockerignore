@@ -1,0 +1,15 @@
+.git
+.venv
+.venv-ft
+data
+mirror
+dist
+index*.bin
+index*.json
+*.jsonl
+crawl.log
+.pytest_cache
+.ruff_cache
+.hypothesis
+.coverage
+**/__pycache__
