@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/FireYaguar/lab7_Python/actions/workflows/ci.yml/badge.svg)](https://github.com/FireYaguar/lab7_Python/actions/workflows/ci.yml)
 
-**🔎 Live: https://findex-OWNER.onrender.com** · API: [`/docs`](https://findex-OWNER.onrender.com/docs) · health: [`/health`](https://findex-OWNER.onrender.com/health)
+**🔎 Live: https://findex-zt18.onrender.com** · API: [`/docs`](https://findex-zt18.onrender.com/docs) · health: [`/health`](https://findex-zt18.onrender.com/health)
 
 Повнотекстовий пошуковик, який будую протягом семестру (курс «Python — Build a Search Engine», 8 лабораторних).
 Кожна лабораторна — окремий git-тег (`lab-01`, `lab-02`, …).
@@ -608,7 +608,10 @@ INDEX_PATH=index.bin uvicorn findex.web.app:app  # те саме напряму
 | local, 1 worker, `async def` | `/search_async` | 50 | 62.3 | 806 | 881 | 2704 |
 | local, 1 worker, `def` | `/search` | 50 | 53.0 | 955 | 1349 | 1867 |
 | local, 4 workers, `def` | `/search` | 50 | **117.7** | **413** | **698** | **820** |
-| deployed (Render free) | `/search` | 20 | _заповнити_ | | | |
+| deployed (Render free) | `/search` | 20 | 6.9 | 3098 | 4002 | 4309 |
+
+**Розгорнутий сервіс** (`oha -z 30s -c 20`, 8 листопада 2026): 187 відповідей, усі `200`; ще 20 запитів були в дорозі, коли спливли 30 секунд (`aborted due to deadline`), це не помилки сервера. 6,9 запиту/с і p50 3,1 с дає не мережа (з'єднання ~0,15 с), а **черга**: за законом Літтла 20 клієнтів / 6,9 запиту/с ≈ 2,9 с очікування, майже рівно p50. Сервер весь час зайнятий, і кожен запит стоїть за ~19 іншими. Причина в частці процесора безкоштовного плану Render (0,1 CPU, 1 воркер): пошук, який локально займає кілька десятків мілісекунд CPU, тут триває ~145 мс (1 / 6,9 с). Кілька воркерів тут не допомогли б (Лаба 5): процеси ділили б ту саму десяту частку одного ядра.
+
 
 **Як це пов'язано з Лабами 5–6.** Один процес упирається в **GIL** (Лаба 5): пошук — це Python-код на CPU, тож і `async def`, і пул потоків виконують його по одному запиту за раз, звідси стеля ~55–60 RPS ≈ 1 / 17 мс. `async def` дав навіть трохи більше RPS (немає перемикань між потоками), але це **заблокований цикл подій** з Лаби 6. Запити обробляються в порядку прийняття, хтось потрапляє в кінець черги, і p99 = 2,7 с (у 3,4 раза гірше за p50). **Пул потоків** (`def`) не додає паралелізму, бо GIL той самий, зате цикл подій вільний і черга «чесніша»: p99 1,9 с, і сторонні запити (`/health`) не застрягають. Реально помогли **кілька процесів**: 4 воркери uvicorn — це 4 інтерпретатори з власними GIL, тож на 2 ядрах RPS зріс у 2,2 раза, а p99 впав до 0,8 с. Більше ніж 2× тут не отримати: ядер лише 2, і ще одне ділить `oha`. Це те саме, що `ProcessPoolExecutor` у Лабі 5, тільки процеси тримає uvicorn.
 
@@ -628,7 +631,7 @@ docker run --rm -p 8000:8000 -e INDEX_PATH=/app/index.bin findex     # http://lo
 **Render** (безкоштовний план, Docker runtime): `render.yaml` у корені — це Blueprint.
 1. render.com → New → **Blueprint** → вибрати цей репозиторій (або New → Web Service → Docker).
 2. **Health Check Path = `/health`** (уже в `render.yaml`). Render сам задає `$PORT`, змінні оточення — у вкладці Environment, логи — у вкладці **Logs** (там видно `loaded Index(...)` та access-лог).
-3. Публічну адресу вписати на початок README (замість `findex-OWNER.onrender.com`).
+3. Публічна адреса: **https://findex-zt18.onrender.com** (вона ж на початку README).
 4. Рядок «deployed» для таблиці: `oha -z 30s -c 20 "https://<адреса>/search?q=python"`.
 
 Безкоштовний інстанс Render засинає без трафіку, і перший запит після паузи йде ~30–60 с (холодний старт плюс завантаження індексу), тож перед `oha` відкрий `/health`. Крім того, там зазвичай лише частка ядра, тож RPS буде нижчий за локальний, а p50 додасть мережа (~50–150 мс).
